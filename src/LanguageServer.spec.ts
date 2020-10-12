@@ -2,22 +2,17 @@ import { expect } from 'chai';
 import * as fsExtra from 'fs-extra';
 import * as glob from 'glob';
 import * as path from 'path';
-import { DidChangeWatchedFilesParams, FileChangeType, TextDocumentSyncKind, Range } from 'vscode-languageserver';
+import { DidChangeWatchedFilesParams, FileChangeType, TextDocumentSyncKind, Range, Position } from 'vscode-languageserver';
 import { Deferred } from './deferred';
 import { LanguageServer, Workspace } from './LanguageServer';
 import { ProgramBuilder } from './ProgramBuilder';
-import * as sinonImport from 'sinon';
+import { createSandbox } from 'sinon';
+const sinon = createSandbox();
 import { standardizePath as s, util } from './util';
+import { URI } from 'vscode-uri';
 
-let sinon: sinonImport.SinonSandbox;
-beforeEach(() => {
-    sinon = sinonImport.createSandbox();
-});
-afterEach(() => {
-    sinon.restore();
-});
-
-let rootDir = s`${process.cwd()}`;
+const tempDir = s`${process.cwd()}/.tmp`;
+let rootDir = s`${tempDir}/rootDir`;
 
 describe('LanguageServer', () => {
     let server: LanguageServer;
@@ -61,6 +56,9 @@ describe('LanguageServer', () => {
         vfs = {};
         physicalFilePaths = [];
 
+        fsExtra.ensureDirSync(rootDir);
+        fsExtra.emptyDirSync(rootDir);
+
         //hijack the file resolver so we can inject in-memory files for our tests
         let originalResolver = svr.documentFileResolver;
         svr.documentFileResolver = (pathAbsolute: string) => {
@@ -94,6 +92,9 @@ describe('LanguageServer', () => {
 
         }
         server.dispose();
+        fsExtra.ensureDirSync(rootDir);
+        fsExtra.emptyDirSync(rootDir);
+        sinon.restore();
     });
 
     function writeToFs(pathAbsolute: string, contents: string) {
@@ -190,6 +191,52 @@ describe('LanguageServer', () => {
         });
     });
 
+    describe.only('completions', () => {
+        it('sends completions', async () => {
+            fsExtra.outputFileSync(s`${rootDir}/source/main.brs`, `
+                sub main()
+                    person = {}
+                    print obj.
+                end sub
+            `);
+            workspaceFolders.push({
+                name: 'Project1',
+                uri: URI.file(rootDir).toString()
+            });
+            server.run();
+            await server['onInitialized']();
+            const completions = await server['onCompletion'](URI.file(s`${rootDir}/source/main.brs`).toString(), Position.create(3, 30));
+            expect(completions.map(x => x.label)).to.eql(['person']);
+        });
+
+        it('does not duplicate completions for multi-workspace', async () => {
+            fsExtra.outputFileSync(s`${tempDir}/project1/source/main.brs`, `
+                sub main()
+                    bob = {
+                        person: true
+                    }
+                    print obj.
+                end sub
+            `);
+            fsExtra.outputFileSync(s`${tempDir}/project2/source/main.brs`, `
+                sub main()
+                    person = {}
+                    print obj.
+                end sub
+            `);
+            workspaceFolders.push({
+                name: 'Project1',
+                uri: URI.file(s`${tempDir}/project1`).toString()
+            }, {
+                name: 'Project2',
+                uri: URI.file(s`${tempDir}/project2`).toString()
+            });
+            server.run();
+            await server['onInitialized']();
+            const completions = await server['onCompletion'](URI.file(s`${tempDir}/project2/source/main.brs`).toString(), Position.create(3, 30));
+            expect(completions.map(x => x.label)).to.eql(['person']);
+        });
+    });
     describe('createWorkspace', () => {
         it('prevents creating package on first run', async () => {
             svr.connection = svr.createConnection();
